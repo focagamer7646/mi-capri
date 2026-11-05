@@ -2,3 +2,5 @@ venv/
 backups/
 __pycache__/
 memoria.json
+contactos.json
+creaciones/
