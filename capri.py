@@ -22,7 +22,20 @@ CARPETA = os.path.dirname(os.path.abspath(__file__))
 MEMORIA = os.path.join(CARPETA, "memoria.json")
 
 # Palabras para despertar a Capri (incluyo variantes por si te entiende mal)
-PALABRAS = ("capri", "kapri", "cápri", "capry")
+PALABRAS = ("capri", "kapri", "cápri", "capry", "capi", "cafri", "capre", "kapry", "cabri", "caprí")
+SOLO_AL_INICIO = ("mira", "kapi", "cali")   # cuentan solo si están al empezar la frase
+
+def buscar_palabra(frases):
+    # Revisa cada opción que oyó Google. Devuelve la orden, o None si no la llamaron.
+    for frase in frases:
+        frase = frase.lower().strip()
+        for p in PALABRAS:
+            if p in frase:
+                return frase.split(p, 1)[1].strip(" ,.")
+        for p in SOLO_AL_INICIO:
+            if frase == p or frase.startswith(p + " "):
+                return frase[len(p):].strip(" ,.")
+    return None
 
 SISTEMA = ("Eres Capri, una asistente de IA con estética cyberpunk. Hablas en español, "
            "con tono cercano, leal y con un toque de humor. Respondes en máximo "
@@ -161,12 +174,14 @@ def bucle_escucha():
         while not salir:
             estado = "escuchando"
             try:
-                audio = reconocedor.listen(mic, timeout=5, phrase_time_limit=12)
-                texto = reconocedor.recognize_google(audio, language="es-CO").lower()
-                print("Escuché:", texto)
-                encontrada = next((p for p in PALABRAS if p in texto), None)
-                if encontrada:
-                    orden = texto.split(encontrada, 1)[1].strip(" ,.")
+                                audio = reconocedor.listen(mic, timeout=5, phrase_time_limit=12)
+                resultado = reconocedor.recognize_google(audio, language="es-CO", show_all=True)
+                frases = [a["transcript"] for a in resultado.get("alternative", [])] if resultado else []
+                if not frases:
+                    continue
+                print("Escuché:", frases)
+                orden = buscar_palabra(frases)
+                if orden is not None:
                     if orden:
                         procesar(motor, orden)
                     else:
