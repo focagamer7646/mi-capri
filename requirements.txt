@@ -4,3 +4,5 @@ pyttsx3
 anthropic
 AppOpener
 Pillow
+pyautogui
+pyperclip
