@@ -1,7 +1,7 @@
 SpeechRecognition
 PyAudio
 pyttsx3
-anthropic
+ollama
 AppOpener
 Pillow
 pyautogui
