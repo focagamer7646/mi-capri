@@ -111,21 +111,137 @@ def hacer_respaldo():
     return nombre
 
 # ---------------- VOZ (Capri habla) ----------------
+import asyncio
+
+# --- AJUSTES DE LA VOZ (puedes cambiarlos) ---
+USAR_VOZ_NEURAL = True             # True = voz natural por internet. False = voz normal de Windows
+VOZ_NEURAL = "es-CO-SalomeNeural"  # voz de inicio (después la cambias diciendo "Capri, cambia tu voz")
+RITMO = "+0%"                      # velocidad: "+10%" más rápida, "-10%" más lenta
+TONO = "+0Hz"                      # tono: "+5Hz" más aguda, "-5Hz" más grave
+VOZ_PREFERIDA = "sabina"           # voz normal de Windows: parte de su nombre, en minúsculas
+VELOCIDAD = 175                    # velocidad de la voz normal de Windows
+
+# Voces entre las que puedes escoger (código y descripción)
+VOCES = [
+    ("es-CO-SalomeNeural", "Salomé, mujer de Colombia"),
+    ("es-CO-GonzaloNeural", "Gonzalo, hombre de Colombia"),
+    ("es-MX-DaliaNeural", "Dalia, mujer de México"),
+    ("es-MX-JorgeNeural", "Jorge, hombre de México"),
+    ("es-ES-ElviraNeural", "Elvira, mujer de España"),
+    ("es-ES-AlvaroNeural", "Álvaro, hombre de España"),
+    ("es-AR-ElenaNeural", "Elena, mujer de Argentina"),
+    ("es-US-PalomaNeural", "Paloma, mujer de Estados Unidos"),
+]
+
+ARCHIVO_VOZ = os.path.join(CARPETA, "voz.json")
+
+def cargar_voz():
+    try:
+        with open(ARCHIVO_VOZ, "r", encoding="utf-8") as f:
+            return json.load(f).get("voz", VOZ_NEURAL)
+    except Exception:
+        return VOZ_NEURAL
+
+def guardar_voz(codigo):
+    try:
+        with open(ARCHIVO_VOZ, "w", encoding="utf-8") as f:
+            json.dump({"voz": codigo}, f)
+    except Exception as e:
+        print("No pude guardar la voz:", e)
+
+VOZ_NEURAL = cargar_voz()   # usa la voz que escogiste la última vez
+
+try:
+    import edge_tts
+    import pygame
+    pygame.mixer.init()
+except Exception:
+    edge_tts = None
+    pygame = None
+
 def crear_motor():
     motor = pyttsx3.init()
-    for v in motor.getProperty("voices"):
-        if "spanish" in v.name.lower() or "es-" in v.id.lower() or "sabina" in v.name.lower():
-            motor.setProperty("voice", v.id)
+    voces = motor.getProperty("voices")
+    print("Voces de Windows disponibles:", [v.name for v in voces])
+    elegida = None
+    for v in voces:
+        if VOZ_PREFERIDA and VOZ_PREFERIDA in v.name.lower():
+            elegida = v.id
             break
-    motor.setProperty("rate", 175)
+    if not elegida:
+        for v in voces:
+            if "spanish" in v.name.lower() or "es-" in v.id.lower() or "sabina" in v.name.lower():
+                elegida = v.id
+                break
+    if elegida:
+        motor.setProperty("voice", elegida)
+    motor.setProperty("rate", VELOCIDAD)
     return motor
+
+def hablar_neural(texto):
+    ruta = os.path.join(CARPETA, "voz_temp.mp3")
+    async def generar():
+        await edge_tts.Communicate(texto, VOZ_NEURAL, rate=RITMO, pitch=TONO).save(ruta)
+    asyncio.run(generar())
+    pygame.mixer.music.load(ruta)
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        time.sleep(0.05)
+    pygame.mixer.music.unload()
 
 def hablar(motor, texto):
     global estado
     print("Capri:", texto)
     estado = "hablando"
+    if USAR_VOZ_NEURAL and edge_tts and pygame:
+        try:
+            hablar_neural(texto)
+            return
+        except Exception as e:
+            print("La voz natural falló, uso la normal:", e)
     motor.say(texto)
     motor.runAndWait()
+
+def cambiar_voz(motor, orden):
+    # Capri se presenta con cada voz y tú dices "sí" a la que te guste
+    global VOZ_NEURAL, estado
+    if not (USAR_VOZ_NEURAL and edge_tts and pygame):
+        hablar(motor, "La voz natural no está activa, así que no puedo cambiar de voz.")
+        return
+    anterior = VOZ_NEURAL
+    # Si dices el nombre ("cambia tu voz a Gonzalo"), la pone directo
+    n = normalizar(orden)
+    for codigo, desc in VOCES:
+        nombre = desc.split(",")[0]
+        if normalizar(nombre) in n:
+            VOZ_NEURAL = codigo
+            guardar_voz(codigo)
+            hablar(motor, f"Listo, ahora soy {nombre}. ¿Qué tal suena mi voz?")
+            return
+    # Si no, se presenta con todas las voces, una por una
+    for codigo, desc in VOCES:
+        VOZ_NEURAL = codigo
+        hablar(motor, f"Hola, soy {desc}. ¿Me quedo con esta voz? Di sí o no.")
+        estado = "escuchando"
+        respuesta = None
+        for f in escuchar_frases(8):
+            palabras = set(normalizar(f).split())
+            if palabras & NO_PALABRAS:
+                respuesta = False
+                break
+            if palabras & SI_PALABRAS:
+                respuesta = True
+                break
+        if respuesta:
+            guardar_voz(codigo)
+            hablar(motor, "Perfecto, me quedo con esta voz.")
+            return
+        if respuesta is None:
+            VOZ_NEURAL = anterior
+            hablar(motor, "No te escuché, así que dejo mi voz como estaba.")
+            return
+    VOZ_NEURAL = anterior
+    hablar(motor, "Ya te mostré todas mis voces. Dejo la que tenía.")
 
 # ---------------- PERMISOS ----------------
 SI_PALABRAS = {"si", "claro", "dale", "adelante", "confirmo", "ok", "okey",
@@ -376,6 +492,9 @@ def procesar(motor, orden):
         hablar(motor, random.choice(MAS))
     elif m_crea:
         crear_contenido(motor, m_crea)
+        hablar(motor, random.choice(MAS))
+    elif "voz" in orden and any(p in orden for p in ("cambia", "cambiar", "otra", "elige", "escoge")):
+        cambiar_voz(motor, orden)
         hablar(motor, random.choice(MAS))
     elif "portapapeles" in orden or "lo que copi" in orden:
         leer_portapapeles(motor)
