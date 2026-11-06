@@ -21,8 +21,8 @@ try:
 except Exception:
     pyperclip = None
 try:
-    from anthropic import Anthropic
-    cliente = Anthropic()
+    import ollama
+    cliente = ollama
 except Exception:
     cliente = None
 
@@ -37,6 +37,9 @@ PEDIR_PERMISO_AL_ABRIR_PAGINAS = False    # ponlo en True si quieres permiso has
 MOVERSE = False                           # False = Capri se queda quieta. True = pasea por la pantalla
 MARGEN_X = 10                             # distancia al borde derecho de la pantalla
 MARGEN_Y = 60                             # distancia al borde de abajo (60 = encima de la barra de tareas)
+SEGUNDOS_ACTIVA = 60        # tiempo que Capri sigue atenta sin que digas "Capri"
+SIEMPRE_ESCUCHANDO = False  # True = nunca necesita que la llames
+despierta_hasta = 0         # (no tocar) hasta qué momento sigue atenta
 
 PALABRAS = ("capri", "kapri", "cápri", "capry", "capi", "cafri", "capre", "kapry", "cabri", "caprí")
 SOLO_AL_INICIO = ("mira", "kapi", "cali")
@@ -465,22 +468,24 @@ def leer_portapapeles(motor):
     hablar(motor, texto.strip()[:600])
 
 def conversar(texto):
+  def conversar(texto):
     if cliente is None:
         return random.choice(["Aquí estoy.", "Te escucho.", "Dime."])
     historial.append({"role": "user", "content": texto})
     try:
-        r = cliente.messages.create(model="claude-sonnet-5-5", max_tokens=300,
-                                    system=SISTEMA, messages=historial[-20:])
-        respuesta = r.content[0].text
+        r = cliente.chat(model="llama3.2",
+                         messages=[{"role": "system", "content": SISTEMA}] + historial[-20:],
+                         options={"num_predict": 120})
+        respuesta = r["message"]["content"]
     except Exception:
         historial.pop()
-        return "No pude conectar con mi cerebro. Revisa tu clave de API o tu internet."
+        return "No pude conectar con mi cerebro. Revisa que Ollama esté abierto."
     historial.append({"role": "assistant", "content": respuesta})
     guardar_memoria()
     return respuesta
 
 def procesar(motor, orden):
-    global salir, estado
+    global salir, estado, SIEMPRE_ESCUCHANDO
     estado = "pensando"
     m_msg = PATRON_MENSAJE.search(orden)
     m_crea = PATRON_CREAR.search(orden)
@@ -492,6 +497,14 @@ def procesar(motor, orden):
         hablar(motor, random.choice(MAS))
     elif m_crea:
         crear_contenido(motor, m_crea)
+        hablar(motor, random.choice(MAS))
+    elif any(p in normalizar(orden) for p in ("escuchame siempre", "modo continuo", "siempre atenta")):
+        SIEMPRE_ESCUCHANDO = True
+        hablar(motor, "Entendido, ahora te escucho siempre, sin que tengas que llamarme.")
+        hablar(motor, random.choice(MAS))
+    elif any(p in normalizar(orden) for p in ("modo normal", "solo cuando te llame", "deja de escucharme")):
+        SIEMPRE_ESCUCHANDO = False
+        hablar(motor, "De acuerdo, volveré a esperar a que me llames.")
         hablar(motor, random.choice(MAS))
     elif "voz" in orden and any(p in orden for p in ("cambia", "cambiar", "otra", "elige", "escoge")):
         cambiar_voz(motor, orden)
@@ -528,11 +541,12 @@ def procesar(motor, orden):
 
 # ---------------- OÍDOS (ciclo que nunca se cierra) ----------------
 def bucle_escucha():
-    global estado, MIC, RECO
+    global estado, MIC, RECO, despierta_hasta
     motor = crear_motor()
     reconocedor = sr.Recognizer()
     RECO = reconocedor
     hablar(motor, "Hola, soy Capri. Sistemas en línea. ¿En qué te ayudo?")
+    despierta_hasta = time.time() + SEGUNDOS_ACTIVA
     try:
         hacer_respaldo()
     except Exception as e:
@@ -550,11 +564,15 @@ def bucle_escucha():
                     continue
                 print("Escuché:", frases)
                 orden = buscar_palabra(frases)
+                atenta = SIEMPRE_ESCUCHANDO or time.time() < despierta_hasta
+                if orden is None and atenta:
+                    orden = frases[0].lower().strip(" ,.")   # no dijo "Capri", pero sigue atenta
                 if orden is not None:
                     if orden:
                         procesar(motor, orden)
                     else:
                         hablar(motor, "¿Sí?")
+                    despierta_hasta = time.time() + SEGUNDOS_ACTIVA
             except (sr.WaitTimeoutError, sr.UnknownValueError):
                 continue
             except Exception as e:
