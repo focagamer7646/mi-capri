@@ -6,3 +6,5 @@ AppOpener
 Pillow
 pyautogui
 pyperclip
+edge-tts
+pygame
