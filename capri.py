@@ -37,9 +37,11 @@ PEDIR_PERMISO_AL_ABRIR_PAGINAS = False    # ponlo en True si quieres permiso has
 MOVERSE = False                           # False = Capri se queda quieta. True = pasea por la pantalla
 MARGEN_X = 10                             # distancia al borde derecho de la pantalla
 MARGEN_Y = 60                             # distancia al borde de abajo (60 = encima de la barra de tareas)
-SEGUNDOS_ACTIVA = 60        # tiempo que Capri sigue atenta sin que digas "Capri"
-SIEMPRE_ESCUCHANDO = False  # True = nunca necesita que la llames
-despierta_hasta = 0         # (no tocar) hasta qué momento sigue atenta
+SEGUNDOS_ACTIVA = 60                      # tiempo que Capri sigue atenta sin que digas "Capri"
+SIEMPRE_ESCUCHANDO = False                # True = nunca necesita que la llames
+despierta_hasta = 0                       # (no tocar) hasta qué momento sigue atenta
+MODELO_IA = "llama3.2"                    # cerebro que usa Capri (Ollama)
+DIAPOSITIVAS = 6                          # cuántas diapositivas inventa en las presentaciones
 
 PALABRAS = ("capri", "kapri", "cápri", "capry", "capi", "cafri", "capre", "kapry", "cabri", "caprí")
 SOLO_AL_INICIO = ("mira", "kapi", "cali")
@@ -86,7 +88,10 @@ def buscar_palabra(frases):
 def cargar_memoria():
     try:
         with open(MEMORIA, "r", encoding="utf-8") as f:
-            return json.load(f)
+            datos = json.load(f)
+        # descarta mensajes vacíos o dañados
+        return [m for m in datos if isinstance(m, dict)
+                and isinstance(m.get("content"), str) and m["content"].strip()]
     except Exception:
         return []
 
@@ -124,7 +129,6 @@ TONO = "+0Hz"                      # tono: "+5Hz" más aguda, "-5Hz" más grave
 VOZ_PREFERIDA = "sabina"           # voz normal de Windows: parte de su nombre, en minúsculas
 VELOCIDAD = 175                    # velocidad de la voz normal de Windows
 
-# Voces entre las que puedes escoger (código y descripción)
 VOCES = [
     ("es-CO-SalomeNeural", "Salomé, mujer de Colombia"),
     ("es-CO-GonzaloNeural", "Gonzalo, hombre de Colombia"),
@@ -194,6 +198,9 @@ def hablar_neural(texto):
 
 def hablar(motor, texto):
     global estado
+    # Nunca intenta decir algo vacío (eso era lo que trababa a Capri)
+    if not isinstance(texto, str) or not texto.strip():
+        texto = "No supe qué responder."
     print("Capri:", texto)
     estado = "hablando"
     if USAR_VOZ_NEURAL and edge_tts and pygame:
@@ -202,8 +209,15 @@ def hablar(motor, texto):
             return
         except Exception as e:
             print("La voz natural falló, uso la normal:", e)
-    motor.say(texto)
-    motor.runAndWait()
+    try:
+        motor.say(texto)
+        motor.runAndWait()
+    except Exception as e:
+        print("La voz normal falló:", e)
+        try:
+            motor.stop()
+        except Exception:
+            pass
 
 def cambiar_voz(motor, orden):
     # Capri se presenta con cada voz y tú dices "sí" a la que te guste
@@ -212,7 +226,6 @@ def cambiar_voz(motor, orden):
         hablar(motor, "La voz natural no está activa, así que no puedo cambiar de voz.")
         return
     anterior = VOZ_NEURAL
-    # Si dices el nombre ("cambia tu voz a Gonzalo"), la pone directo
     n = normalizar(orden)
     for codigo, desc in VOCES:
         nombre = desc.split(",")[0]
@@ -221,7 +234,6 @@ def cambiar_voz(motor, orden):
             guardar_voz(codigo)
             hablar(motor, f"Listo, ahora soy {nombre}. ¿Qué tal suena mi voz?")
             return
-    # Si no, se presenta con todas las voces, una por una
     for codigo, desc in VOCES:
         VOZ_NEURAL = codigo
         hablar(motor, f"Hola, soy {desc}. ¿Me quedo con esta voz? Di sí o no.")
@@ -383,34 +395,140 @@ def crear_contenido(motor, m):
     es_mapa = "mapa" in tipo
     items = [limpiar(i) for i in re.split(r",|\sy\s", resto)] if resto else []
     items = [i for i in items if i]
-    if not items:
-        hablar(motor, "Dime los puntos así: crea un mapa de tu tema con punto uno, punto dos y punto tres.")
-        return
+    usa_ia = not items          # si no dices los puntos, Capri los inventa
     art, nombre = ("un", "mapa conceptual") if es_mapa else ("una", "presentación")
     abierto = "abierto" if es_mapa else "abierta"
-    if not pedir_permiso(motor, f"Voy a crear {art} {nombre} sobre {tema} y abrirla en tu navegador. "
+    if usa_ia and cliente is None:
+        hablar(motor, "Para escribir yo el contenido necesito a Ollama. Dime los puntos tú.")
+        return
+    extra = " Yo escribiré el contenido." if usa_ia else ""
+    if not pedir_permiso(motor, f"Voy a crear {art} {nombre} sobre {tema} y abrirla en tu navegador.{extra} "
                                 "¿Me das permiso?"):
         hablar(motor, "Entendido, no hice nada.")
         return
 
-    os.makedirs(CREACIONES, exist_ok=True)
-    titulo = html.escape(tema.capitalize())
-    if es_mapa:
-        lineas = ["mindmap", "  root((" + tema + "))"] + ["    " + i for i in items]
-        pagina = PLANTILLA_MAPA.replace("__TITULO__", titulo).replace("__MAPA__", "\n".join(lineas))
+    titulo = tema.capitalize()
+    ramas, diapositivas = [], []
+    if usa_ia:
+        hablar(motor, "Dame un momento, estoy escribiendo el contenido. Puede tardar un poco.")
+        for _ in range(2):          # lo intenta hasta 2 veces
+            try:
+                if es_mapa:
+                    ramas = ia_mapa(tema)
+                else:
+                    titulo, diapositivas = ia_presentacion(tema)
+                    titulo = titulo or tema.capitalize()
+            except Exception as e:
+                print("Error de la IA:", e)
+            if ramas or diapositivas:
+                break
+        if not (ramas or diapositivas):
+            hablar(motor, "No pude escribir el contenido. Revisa que Ollama esté abierto o dime los puntos tú.")
+            return
+    elif es_mapa:
+        ramas = [(i, []) for i in items]
     else:
-        slides = ['<div class="slide" contenteditable="true"><h1>' + titulo +
+        diapositivas = [(i.capitalize(), []) for i in items]
+
+    os.makedirs(CREACIONES, exist_ok=True)
+    if es_mapa:
+        lineas = ["mindmap", "  root((" + tema + "))"]
+        for rama, subs in ramas:
+            lineas.append("    " + rama)
+            for s in subs:
+                lineas.append("      " + s)
+        pagina = PLANTILLA_MAPA.replace("__TITULO__", html.escape(titulo)).replace("__MAPA__", "\n".join(lineas))
+    else:
+        slides = ['<div class="slide" contenteditable="true"><h1>' + html.escape(titulo) +
                   '</h1><p>Presentación creada por Capri</p></div>']
-        for i in items:
-            slides.append('<div class="slide" contenteditable="true"><h2>' + html.escape(i.capitalize()) +
-                          '</h2><p>Haz clic aquí y escribe tu contenido</p></div>')
-        pagina = PLANTILLA_PRES.replace("__TITULO__", titulo).replace("__SLIDES__", "\n".join(slides))
+        for titulo_s, puntos in diapositivas:
+            if puntos:
+                cuerpo = "<ul>" + "".join("<li>" + html.escape(p) + "</li>" for p in puntos) + "</ul>"
+            else:
+                cuerpo = "<p>Haz clic aquí y escribe tu contenido</p>"
+            slides.append('<div class="slide" contenteditable="true"><h2>' + html.escape(titulo_s) +
+                          '</h2>' + cuerpo + '</div>')
+        plantilla = PLANTILLA_PRES.replace(
+            "</style>", ".slide ul{font-size:1.5em;text-align:left;max-width:900px;color:#ddd;line-height:1.6}</style>")
+        pagina = plantilla.replace("__TITULO__", html.escape(titulo)).replace("__SLIDES__", "\n".join(slides))
 
     ruta = os.path.join(CREACIONES, datetime.datetime.now().strftime("creacion_%Y%m%d_%H%M%S.html"))
     with open(ruta, "w", encoding="utf-8") as f:
         f.write(pagina)
     webbrowser.open(Path(ruta).as_uri())
     hablar(motor, f"Listo, tu {nombre} está {abierto} en el navegador.")
+
+# ---------------- TEXTOS (resúmenes, poemas, cuentos...) ----------------
+PATRON_TEXTO = re.compile(
+    r"(?:escribe|escríbeme|escribeme|redacta|redáctame|redactame|genera|haz|hazme|crea|créame|creame)\s+(?:un|una)?\s*"
+    r"(texto|resumen|poema|cuento|ensayo|carta|historia|explicación|explicacion|informe|párrafo|parrafo)"
+    r"(?:\s+(?:de la|de los|de las|del|de|sobre|acerca de)\s+(.+))?")
+ARTICULO_TEXTO = {"carta": "una", "historia": "una", "explicación": "una", "explicacion": "una"}
+
+def crear_texto(motor, m):
+    tipo, tema = m.group(1), (m.group(2) or "").strip()
+    art = ARTICULO_TEXTO.get(tipo, "un")
+    abierto = "abierta" if art == "una" else "abierto"
+    if cliente is None:
+        hablar(motor, "Para escribir necesito que Ollama esté instalado.")
+        return
+    if not tema:
+        hablar(motor, "¿Sobre qué tema lo escribo?")
+        frases = escuchar_frases(8)
+        if not frases:
+            hablar(motor, "No te escuché, inténtalo de nuevo.")
+            return
+        tema = frases[0].strip()
+    if not pedir_permiso(motor, f"Voy a escribir {art} {tipo} sobre {tema} y abrirlo en tu navegador. "
+                                "¿Me das permiso?"):
+        hablar(motor, "Entendido, no escribí nada.")
+        return
+    hablar(motor, "Dame un momento, estoy escribiendo. Puede tardar un poco.")
+    try:
+        r = cliente.chat(
+            model=MODELO_IA,
+            messages=[{"role": "system", "content": "Eres un escritor excelente. Escribes en español correcto, claro y bien organizado, sin inventar datos."},
+                      {"role": "user", "content": f"Escribe {art} {tipo} sobre: {tema}."}],
+            options={"num_predict": 700, "temperature": 0.7})
+        texto = (r["message"]["content"] or "").strip()
+    except Exception as e:
+        print("Error de la IA:", e)
+        hablar(motor, "No pude escribirlo. Revisa que Ollama esté abierto.")
+        return
+    if not texto:
+        hablar(motor, "No me salió nada. Inténtalo otra vez.")
+        return
+    os.makedirs(CREACIONES, exist_ok=True)
+    pagina = ("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'><title>" + html.escape(tema) + "</title>"
+              "<style>body{background:#0b0b14;color:#eee;font-family:Segoe UI,Arial,sans-serif;max-width:800px;"
+              "margin:40px auto;padding:0 20px;line-height:1.7;font-size:1.15em}h1{color:#00e5ff}</style></head>"
+              "<body><h1>" + html.escape(tema.capitalize()) + "</h1>"
+              "<div style='white-space:pre-wrap'>" + html.escape(texto) + "</div></body></html>")
+    ruta = os.path.join(CREACIONES, datetime.datetime.now().strftime("texto_%Y%m%d_%H%M%S.html"))
+    with open(ruta, "w", encoding="utf-8") as f:
+        f.write(pagina)
+    webbrowser.open(Path(ruta).as_uri())
+    if pyperclip:
+        pyperclip.copy(texto)
+    hablar(motor, f"Listo, tu {tipo} está {abierto} en el navegador y lo copié para que lo pegues donde quieras.")
+
+# ---------------- MÚSICA ----------------
+PATRON_MUSICA = re.compile(
+    r"^(?:pon|ponme|poner|reproduce|reprodúceme|reproduceme|toca|quiero escuchar|quiero oír|quiero oir)\s+(.+)$")
+
+def poner_musica(motor, m):
+    busqueda = re.sub(r"^((una|un|la|el|unas|unos|algo|música|musica|canción|cancion|canciones|temas|tema|de|del)\s+)+",
+                      "", m.group(1).strip())
+    if not busqueda:
+        hablar(motor, "¿Qué canción quieres escuchar?")
+        frases = escuchar_frases(8)
+        if not frases:
+            hablar(motor, "No te escuché, inténtalo de nuevo.")
+            return
+        busqueda = frases[0].strip()
+    hablar(motor, random.choice(INICIO))
+    webbrowser.open("https://duckduckgo.com/?q=!ducky+site:youtube.com+" + urllib.parse.quote_plus(busqueda))
+    hablar(motor, "Listo, busqué " + busqueda + " en YouTube.")
 
 # ---------------- PÁGINAS WEB ----------------
 PREFIJOS_WEB = ("entra a ", "entra en ", "ve a ", "abre la página ", "abre la pagina ",
@@ -467,23 +585,67 @@ def leer_portapapeles(motor):
         return
     hablar(motor, texto.strip()[:600])
 
+# ---------------- CEREBRO (IA con Ollama) ----------------
 def conversar(texto):
-  def conversar(texto):
     if cliente is None:
         return random.choice(["Aquí estoy.", "Te escucho.", "Dime."])
     historial.append({"role": "user", "content": texto})
     try:
-        r = cliente.chat(model="llama3.2",
+        r = cliente.chat(model=MODELO_IA,
                          messages=[{"role": "system", "content": SISTEMA}] + historial[-20:],
                          options={"num_predict": 120})
-        respuesta = r["message"]["content"]
-    except Exception:
+        print("Respuesta cruda de Ollama:", r)
+        respuesta = (r["message"]["content"] or "").strip()
+    except Exception as e:
+        print("Error de Ollama:", e)
         historial.pop()
         return "No pude conectar con mi cerebro. Revisa que Ollama esté abierto."
+    if not respuesta:
+        historial.pop()
+        return "No supe qué responder. Intenta decírmelo de otra forma."
     historial.append({"role": "assistant", "content": respuesta})
     guardar_memoria()
     return respuesta
 
+def pedir_json(instruccion):
+    # Le pide a la IA una respuesta en formato de datos y la convierte
+    r = cliente.chat(
+        model=MODELO_IA,
+        messages=[{"role": "system", "content": "Eres un asistente experto. Respondes SOLO con JSON válido, en español, con información correcta."},
+                  {"role": "user", "content": instruccion}],
+        format="json",
+        options={"num_predict": 1400, "temperature": 0.5})
+    texto = r["message"]["content"]
+    return json.loads(texto[texto.find("{"): texto.rfind("}") + 1])
+
+def ia_presentacion(tema):
+    d = pedir_json(
+        "Crea el contenido de una presentación sobre: " + tema + ". "
+        "Responde con este formato JSON exacto: "
+        '{"titulo": "...", "diapositivas": [{"titulo": "...", "puntos": ["...", "...", "..."]}]}. '
+        "Haz " + str(DIAPOSITIVAS) + " diapositivas. La primera es la introducción y la última las conclusiones. "
+        "Cada diapositiva tiene 3 puntos cortos (máximo 14 palabras cada uno), claros y verdaderos.")
+    diapositivas = []
+    for s in d.get("diapositivas", []):
+        puntos = [str(p).strip() for p in s.get("puntos", []) if str(p).strip()]
+        if s.get("titulo") and puntos:
+            diapositivas.append((str(s["titulo"]).strip(), puntos))
+    return str(d.get("titulo", tema)).strip(), diapositivas
+
+def ia_mapa(tema):
+    d = pedir_json(
+        "Crea un mapa conceptual sobre: " + tema + ". "
+        'Responde con este formato JSON exacto: {"ramas": [{"titulo": "...", "subtemas": ["...", "..."]}]}. '
+        "Haz 4 ramas con 2 o 3 subtemas cada una. Usa palabras cortas (máximo 4 palabras por texto).")
+    ramas = []
+    for rama in d.get("ramas", []):
+        titulo = limpiar(str(rama.get("titulo", "")))
+        subs = [limpiar(str(s)) for s in rama.get("subtemas", []) if str(s).strip()]
+        if titulo:
+            ramas.append((titulo, [s for s in subs if s]))
+    return ramas
+
+# ---------------- ÓRDENES ----------------
 def procesar(motor, orden):
     global salir, estado, SIEMPRE_ESCUCHANDO
     estado = "pensando"
@@ -495,9 +657,6 @@ def procesar(motor, orden):
     elif m_msg:
         enviar_mensaje(motor, m_msg)
         hablar(motor, random.choice(MAS))
-    elif m_crea:
-        crear_contenido(motor, m_crea)
-        hablar(motor, random.choice(MAS))
     elif any(p in normalizar(orden) for p in ("escuchame siempre", "modo continuo", "siempre atenta")):
         SIEMPRE_ESCUCHANDO = True
         hablar(motor, "Entendido, ahora te escucho siempre, sin que tengas que llamarme.")
@@ -508,6 +667,15 @@ def procesar(motor, orden):
         hablar(motor, random.choice(MAS))
     elif "voz" in orden and any(p in orden for p in ("cambia", "cambiar", "otra", "elige", "escoge")):
         cambiar_voz(motor, orden)
+        hablar(motor, random.choice(MAS))
+    elif PATRON_MUSICA.search(orden) and "voz" not in orden:
+        poner_musica(motor, PATRON_MUSICA.search(orden))
+        hablar(motor, random.choice(MAS))
+    elif PATRON_TEXTO.search(orden):
+        crear_texto(motor, PATRON_TEXTO.search(orden))
+        hablar(motor, random.choice(MAS))
+    elif m_crea:
+        crear_contenido(motor, m_crea)
         hablar(motor, random.choice(MAS))
     elif "portapapeles" in orden or "lo que copi" in orden:
         leer_portapapeles(motor)
